@@ -21,6 +21,16 @@ use git::{GitEntry, GitManager};
 #[derive(Parser)]
 #[command(name = "git-time-machine")]
 #[command(about = "🕰️  Undo ANY git mistake in 3 seconds", long_about = None)]
+#[command(after_help = "EXAMPLES:\n  \
+    git-time-machine              # Show last 50 reflog entries\n  \
+    git-time-machine --all        # Show all reflog entries\n\n\
+CONTROLS:\n  \
+    ↑/k, ↓/j    Navigate up/down\n  \
+    Home/End    Jump to first/last entry\n  \
+    PgUp/PgDn   Jump 10 entries\n  \
+    Space       Toggle diff preview\n  \
+    Enter       Restore to selected commit\n  \
+    q/Esc       Quit")]
 struct Cli {
     /// Show all reflog entries (default: last 50)
     #[arg(short, long)]
@@ -31,7 +41,6 @@ struct App {
     git_manager: GitManager,
     entries: Vec<GitEntry>,
     list_state: ListState,
-    selected_index: usize,
     show_confirmation: bool,
     show_diff: bool,
     diff_content: String,
@@ -53,7 +62,6 @@ impl App {
             git_manager,
             entries,
             list_state,
-            selected_index: 0,
             show_confirmation: false,
             show_diff: false,
             diff_content: String::new(),
@@ -61,14 +69,18 @@ impl App {
         })
     }
 
-    fn next(&mut self) {
+    fn selected_index(&self) -> usize {
+        self.list_state.selected().unwrap_or(0)
+    }
+
+    fn next(&mut self) -> Result<()> {
         if self.entries.is_empty() {
-            return;
+            return Ok(());
         }
         let i = match self.list_state.selected() {
             Some(i) => {
                 if i >= self.entries.len() - 1 {
-                    0
+                    i // Clamp at bottom instead of wrap-around
                 } else {
                     i + 1
                 }
@@ -76,17 +88,24 @@ impl App {
             None => 0,
         };
         self.list_state.select(Some(i));
-        self.selected_index = i;
+        
+        // Update diff if showing
+        if self.show_diff {
+            if let Some(entry) = self.entries.get(i) {
+                self.diff_content = self.git_manager.get_diff_stat(&entry.hash)?;
+            }
+        }
+        Ok(())
     }
 
-    fn previous(&mut self) {
+    fn previous(&mut self) -> Result<()> {
         if self.entries.is_empty() {
-            return;
+            return Ok(());
         }
         let i = match self.list_state.selected() {
             Some(i) => {
                 if i == 0 {
-                    self.entries.len() - 1
+                    0 // Clamp at top instead of wrap-around
                 } else {
                     i - 1
                 }
@@ -94,13 +113,21 @@ impl App {
             None => 0,
         };
         self.list_state.select(Some(i));
-        self.selected_index = i;
+        
+        // Update diff if showing
+        if self.show_diff {
+            if let Some(entry) = self.entries.get(i) {
+                self.diff_content = self.git_manager.get_diff_stat(&entry.hash)?;
+            }
+        }
+        Ok(())
     }
 
     fn toggle_diff(&mut self) -> Result<()> {
         self.show_diff = !self.show_diff;
         if self.show_diff {
-            if let Some(entry) = self.entries.get(self.selected_index) {
+            let idx = self.selected_index();
+            if let Some(entry) = self.entries.get(idx) {
                 self.diff_content = self.git_manager.get_diff_stat(&entry.hash)?;
             }
         }
@@ -116,7 +143,8 @@ impl App {
     }
 
     fn restore_selected(&self) -> Result<()> {
-        if let Some(entry) = self.entries.get(self.selected_index) {
+        let idx = self.list_state.selected().unwrap_or(0);
+        if let Some(entry) = self.entries.get(idx) {
             self.git_manager.restore_to_commit(&entry.hash)?;
         }
         Ok(())
@@ -175,8 +203,53 @@ fn run_app<B: ratatui::backend::Backend>(
             } else {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                    KeyCode::Down | KeyCode::Char('j') => app.next(),
-                    KeyCode::Up | KeyCode::Char('k') => app.previous(),
+                    KeyCode::Down | KeyCode::Char('j') => app.next()?,
+                    KeyCode::Up | KeyCode::Char('k') => app.previous()?,
+                    KeyCode::Home => {
+                        if !app.entries.is_empty() {
+                            app.list_state.select(Some(0));
+                            if app.show_diff {
+                                if let Some(entry) = app.entries.first() {
+                                    app.diff_content = app.git_manager.get_diff_stat(&entry.hash)?;
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::End => {
+                        if !app.entries.is_empty() {
+                            let last = app.entries.len() - 1;
+                            app.list_state.select(Some(last));
+                            if app.show_diff {
+                                if let Some(entry) = app.entries.get(last) {
+                                    app.diff_content = app.git_manager.get_diff_stat(&entry.hash)?;
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::PageDown => {
+                        if !app.entries.is_empty() {
+                            let current = app.list_state.selected().unwrap_or(0);
+                            let next = (current + 10).min(app.entries.len() - 1);
+                            app.list_state.select(Some(next));
+                            if app.show_diff {
+                                if let Some(entry) = app.entries.get(next) {
+                                    app.diff_content = app.git_manager.get_diff_stat(&entry.hash)?;
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::PageUp => {
+                        if !app.entries.is_empty() {
+                            let current = app.list_state.selected().unwrap_or(0);
+                            let prev = current.saturating_sub(10);
+                            app.list_state.select(Some(prev));
+                            if app.show_diff {
+                                if let Some(entry) = app.entries.get(prev) {
+                                    app.diff_content = app.git_manager.get_diff_stat(&entry.hash)?;
+                                }
+                            }
+                        }
+                    }
                     KeyCode::Char(' ') => {
                         app.toggle_diff()?;
                     }
@@ -257,7 +330,8 @@ fn ui(f: &mut Frame, app: &mut App) {
         .iter()
         .enumerate()
         .map(|(i, entry)| {
-            let is_selected = i == app.selected_index;
+            let selected_idx = app.selected_index();
+            let is_selected = i == selected_idx;
             let style = if is_selected {
                 Style::default().bg(Color::DarkGray).fg(Color::Yellow).add_modifier(Modifier::BOLD)
             } else {
@@ -296,9 +370,9 @@ fn ui(f: &mut Frame, app: &mut App) {
     // Diff preview pane
     if app.show_diff {
         let diff_text = if app.diff_content.is_empty() {
-            "Loading diff...".to_string()
+            "Loading diff..."
         } else {
-            app.diff_content.clone()
+            &app.diff_content
         };
 
         let diff = Paragraph::new(diff_text)
@@ -316,11 +390,19 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     // Footer with preview or confirmation dialog
     if app.show_confirmation {
-        let confirm_text = if let Some(entry) = app.entries.get(app.selected_index) {
-            format!(
-                "⚠️  CONFIRM: Reset to {} - {}? This will discard uncommitted changes! [y/N]",
-                &entry.hash[..7], entry.message
-            )
+        let selected_idx = app.selected_index();
+        let confirm_text = if let Some(entry) = app.entries.get(selected_idx) {
+            if app.has_uncommitted_changes {
+                format!(
+                    "⚠️  CONFIRM: Reset to {} - {}? This will discard uncommitted changes! [y/N]",
+                    &entry.hash[..7], entry.message
+                )
+            } else {
+                format!(
+                    "⚠️  CONFIRM: Reset to {} - {}? [y/N]",
+                    &entry.hash[..7], entry.message
+                )
+            }
         } else {
             "No entry selected".to_string()
         };
@@ -330,7 +412,8 @@ fn ui(f: &mut Frame, app: &mut App) {
             .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Red)));
         f.render_widget(footer, chunks[2]);
     } else {
-        let footer_text = if let Some(entry) = app.entries.get(app.selected_index) {
+        let selected_idx = app.selected_index();
+        let footer_text = if let Some(entry) = app.entries.get(selected_idx) {
             format!("📍 Will restore to: {} - {} | Press Space for diff preview", &entry.hash[..7], entry.message)
         } else {
             "No entries found".to_string()

@@ -37,6 +37,7 @@ impl GitManager {
         let limit = if show_all { "1000" } else { "50" };
         
         let output = Command::new("git")
+            .current_dir(&self.repo_path)
             .args([
                 "reflog",
                 "--format=%H|%s|%ct",
@@ -78,7 +79,13 @@ impl GitManager {
     }
 
     pub fn restore_to_commit(&self, commit_hash: &str) -> Result<()> {
+        // Validate hash is hex-only to prevent command injection
+        if !commit_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            anyhow::bail!("Invalid commit hash format");
+        }
+
         let output = Command::new("git")
+            .current_dir(&self.repo_path)
             .args(["reset", "--hard", commit_hash])
             .output()
             .context("Failed to restore to commit")?;
@@ -93,6 +100,7 @@ impl GitManager {
 
     pub fn has_uncommitted_changes(&self) -> Result<bool> {
         let output = Command::new("git")
+            .current_dir(&self.repo_path)
             .args(["status", "--porcelain"])
             .output()
             .context("Failed to check git status")?;
@@ -106,7 +114,13 @@ impl GitManager {
     }
 
     pub fn get_diff_stat(&self, commit_hash: &str) -> Result<String> {
+        // Validate hash is hex-only to prevent command injection
+        if !commit_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok("Invalid commit hash format".to_string());
+        }
+
         let output = Command::new("git")
+            .current_dir(&self.repo_path)
             .args(["diff", "--stat", "HEAD", commit_hash])
             .output()
             .context("Failed to get diff stat")?;
