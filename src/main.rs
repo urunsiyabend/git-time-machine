@@ -14,6 +14,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
+use chrono::Local;
 use std::io;
 
 mod git;
@@ -31,6 +32,7 @@ CONTROLS:\n  \
     Home/End    Jump to first/last entry\n  \
     PgUp/PgDn   Jump 10 entries\n  \
     Space       Toggle diff preview\n  \
+    t           Toggle relative/absolute timestamps\n  \
     Enter       Restore to selected commit\n  \
     /           Search/filter commits by message\n  \
     Esc         Clear active filter (or quit if no filter)\n  \
@@ -64,6 +66,7 @@ struct App {
     search_query: String,
     filtered_entries: Vec<usize>,
     search_active: bool,
+    show_absolute_time: bool,
 }
 
 impl App {
@@ -93,6 +96,7 @@ impl App {
             search_query: String::new(),
             filtered_entries,
             search_active: false,
+            show_absolute_time: false,
         })
     }
 
@@ -409,6 +413,9 @@ fn run_app<B: ratatui::backend::Backend>(
                     KeyCode::Char(' ') => {
                         app.toggle_diff()?;
                     }
+                    KeyCode::Char('t') => {
+                        app.show_absolute_time = !app.show_absolute_time;
+                    }
                     KeyCode::Enter => {
                         if app.selected_entry_idx().is_some() {
                             app.show_confirmation_dialog();
@@ -512,7 +519,14 @@ fn ui(f: &mut Frame, app: &mut App) {
 
             let mut spans = vec![
                 Span::styled(prefix, style),
-                Span::styled(&entry.relative_time, time_style),
+                Span::styled(
+                    if app.show_absolute_time {
+                        entry.timestamp.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string()
+                    } else {
+                        entry.relative_time.clone()
+                    },
+                    time_style,
+                ),
                 Span::raw("  "),
                 Span::styled(&entry.hash[..7], Style::default().fg(Color::Yellow)),
                 Span::raw("  "),
