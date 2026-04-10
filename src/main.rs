@@ -14,6 +14,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
+use chrono::Local;
 use std::io;
 
 mod git;
@@ -30,7 +31,9 @@ CONTROLS:\n  \
     ↑/k, ↓/j    Navigate up/down\n  \
     Home/End    Jump to first/last entry\n  \
     PgUp/PgDn   Jump 10 entries\n  \
-    Space       Toggle diff preview\n  \
+    Space       Toggle diff panel\n  \
+    d           Switch between diff summary and full diff\n  \
+    t           Toggle relative/absolute timestamps\n  \
     Enter       Restore to selected commit\n  \
     /           Search/filter commits by message\n  \
     Esc         Clear active filter (or quit if no filter)\n  \
@@ -56,7 +59,9 @@ struct App {
     list_state: ListState,
     show_confirmation: bool,
     show_diff: bool,
+    show_full_diff: bool,
     diff_content: String,
+    full_diff_content: String,
     diff_scroll_offset: u16,
     diff_visible_height: u16,
     has_uncommitted_changes: bool,
@@ -64,6 +69,7 @@ struct App {
     search_query: String,
     filtered_entries: Vec<usize>,
     search_active: bool,
+    show_absolute_time: bool,
 }
 
 impl App {
@@ -85,7 +91,9 @@ impl App {
             list_state,
             show_confirmation: false,
             show_diff: false,
+            show_full_diff: false,
             diff_content: String::new(),
+            full_diff_content: String::new(),
             diff_scroll_offset: 0,
             diff_visible_height: 10,
             has_uncommitted_changes,
@@ -93,6 +101,7 @@ impl App {
             search_query: String::new(),
             filtered_entries,
             search_active: false,
+            show_absolute_time: false,
         })
     }
 
@@ -145,12 +154,15 @@ impl App {
     }
 
     fn update_diff_if_visible(&mut self) -> Result<()> {
-        if self.show_diff {
-            if let Some(idx) = self.selected_entry_idx() {
-                if let Some(entry) = self.entries.get(idx) {
+        if let Some(idx) = self.selected_entry_idx() {
+            if let Some(entry) = self.entries.get(idx) {
+                if self.show_diff {
                     self.diff_content = self.git_manager.get_diff_stat(&entry.hash)?;
-                    self.diff_scroll_offset = 0;
                 }
+                if self.show_full_diff {
+                    self.full_diff_content = self.git_manager.get_full_diff(&entry.hash)?;
+                }
+                self.diff_scroll_offset = 0;
             }
         }
         Ok(())
@@ -197,9 +209,26 @@ impl App {
     fn toggle_diff(&mut self) -> Result<()> {
         self.show_diff = !self.show_diff;
         if self.show_diff {
+            self.show_full_diff = false;
             if let Some(idx) = self.selected_entry_idx() {
                 if let Some(entry) = self.entries.get(idx) {
                     self.diff_content = self.git_manager.get_diff_stat(&entry.hash)?;
+                }
+            }
+        }
+        self.diff_scroll_offset = 0;
+        Ok(())
+    }
+
+    fn toggle_diff_mode(&mut self) -> Result<()> {
+        if !self.show_diff {
+            return Ok(());
+        }
+        self.show_full_diff = !self.show_full_diff;
+        if self.show_full_diff {
+            if let Some(idx) = self.selected_entry_idx() {
+                if let Some(entry) = self.entries.get(idx) {
+                    self.full_diff_content = self.git_manager.get_full_diff(&entry.hash)?;
                 }
             }
         }
@@ -211,8 +240,16 @@ impl App {
         self.diff_scroll_offset = self.diff_scroll_offset.saturating_sub(1);
     }
 
+    fn active_diff_content(&self) -> &str {
+        if self.show_full_diff {
+            &self.full_diff_content
+        } else {
+            &self.diff_content
+        }
+    }
+
     fn scroll_diff_down(&mut self) {
-        let line_count = self.diff_content.lines().count() as u16;
+        let line_count = self.active_diff_content().lines().count() as u16;
         let max_scroll = line_count.saturating_sub(self.diff_visible_height);
         self.diff_scroll_offset = (self.diff_scroll_offset + 1).min(max_scroll);
     }
@@ -409,6 +446,12 @@ fn run_app<B: ratatui::backend::Backend>(
                     KeyCode::Char(' ') => {
                         app.toggle_diff()?;
                     }
+                    KeyCode::Char('d') => {
+                        app.toggle_diff_mode()?;
+                    }
+                    KeyCode::Char('t') => {
+                        app.show_absolute_time = !app.show_absolute_time;
+                    }
                     KeyCode::Enter => {
                         if app.selected_entry_idx().is_some() {
                             app.show_confirmation_dialog();
@@ -512,7 +555,14 @@ fn ui(f: &mut Frame, app: &mut App) {
 
             let mut spans = vec![
                 Span::styled(prefix, style),
-                Span::styled(&entry.relative_time, time_style),
+                Span::styled(
+                    if app.show_absolute_time {
+                        entry.timestamp.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string()
+                    } else {
+                        entry.relative_time.clone()
+                    },
+                    time_style,
+                ),
                 Span::raw("  "),
                 Span::styled(&entry.hash[..7], Style::default().fg(Color::Yellow)),
                 Span::raw("  "),
@@ -576,26 +626,61 @@ fn ui(f: &mut Frame, app: &mut App) {
     // Diff preview pane
     if app.show_diff {
         let diff_area = main_chunks[1];
-        app.diff_visible_height = diff_area.height.saturating_sub(2); // Subtract borders
-        
-        let diff_text = if app.diff_content.is_empty() {
-            "Loading diff..."
+        app.diff_visible_height = diff_area.height.saturating_sub(2);
+
+        if app.show_full_diff {
+            let lines: Vec<Line> = if app.full_diff_content.is_empty() {
+                vec![Line::raw("Loading diff...")]
+            } else {
+                app.full_diff_content
+                    .lines()
+                    .map(|line| {
+                        if line.starts_with('+') && !line.starts_with("+++") {
+                            Line::styled(line, Style::default().fg(Color::Green))
+                        } else if line.starts_with('-') && !line.starts_with("---") {
+                            Line::styled(line, Style::default().fg(Color::Red))
+                        } else if line.starts_with("@@") {
+                            Line::styled(line, Style::default().fg(Color::Cyan))
+                        } else if line.starts_with("diff ") || line.starts_with("index ") {
+                            Line::styled(line, Style::default().fg(Color::Yellow))
+                        } else {
+                            Line::raw(line)
+                        }
+                    })
+                    .collect()
+            };
+
+            let diff = Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Full Diff (d: back to summary | Shift+↑↓/J/K: scroll) ")
+                        .border_style(Style::default().fg(Color::Cyan)),
+                )
+                .scroll((app.diff_scroll_offset, 0))
+                .wrap(ratatui::widgets::Wrap { trim: false });
+
+            f.render_widget(diff, diff_area);
         } else {
-            &app.diff_content
-        };
+            let diff_text = if app.diff_content.is_empty() {
+                "Loading diff..."
+            } else {
+                &app.diff_content
+            };
 
-        let diff = Paragraph::new(diff_text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Diff Preview (Shift+↑↓ or J/K to scroll) ")
-                    .border_style(Style::default().fg(Color::Cyan)),
-            )
-            .style(Style::default().fg(Color::White))
-            .scroll((app.diff_scroll_offset, 0))
-            .wrap(ratatui::widgets::Wrap { trim: false });
+            let diff = Paragraph::new(diff_text)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Diff Summary (d: full diff | Shift+↑↓/J/K: scroll) ")
+                        .border_style(Style::default().fg(Color::Cyan)),
+                )
+                .style(Style::default().fg(Color::White))
+                .scroll((app.diff_scroll_offset, 0))
+                .wrap(ratatui::widgets::Wrap { trim: false });
 
-        f.render_widget(diff, diff_area);
+            f.render_widget(diff, diff_area);
+        }
     }
 
     // Footer with preview or confirmation dialog
